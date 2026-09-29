@@ -6,14 +6,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::notification::FocusNotification;
+#[cfg(not(target_os = "linux"))]
+use crate::state::remembered_terminal;
 use crate::state::{
     cleanup_stale_state_files, cleared_notification_marker_path, plugin_state_dir,
-    prune_stale_workspace_bindings, remembered_terminal,
+    prune_stale_workspace_bindings,
 };
 use crate::util::shell_quote;
 
 /// How long an unclicked notification stays up (seconds) before alerter
 /// auto-dismisses it; 0 would keep it forever.
+#[cfg(not(target_os = "linux"))]
 const ALERTER_TIMEOUT_SECS: u64 = 3600;
 
 pub(crate) fn write_focus_script(
@@ -31,6 +34,7 @@ pub(crate) fn write_focus_script(
     let _ = rewrite_generated_scripts_without_activation();
     let _ = prune_stale_workspace_bindings(herdr_bin);
 
+    #[cfg(not(target_os = "linux"))]
     let timeout_secs = if test_mode {
         test_timeout_secs(ALERTER_TIMEOUT_SECS)
     } else {
@@ -42,6 +46,18 @@ pub(crate) fn write_focus_script(
 
     let script_path = state_dir.join(format!("focus-{:016x}.sh", hasher.finish()));
     let executable_path = env::current_exe()?;
+    #[cfg(target_os = "linux")]
+    let script = {
+        let _ = (monitor_visibility, test_mode);
+        linux_focus_script(
+            notification,
+            herdr_bin,
+            notifier_bin,
+            &crate::notifier::resolve_dbus_monitor_bin().map_err(io::Error::other)?,
+            &executable_path,
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
     let script = focus_script_content_with_timeout(
         notification,
         herdr_bin,
@@ -57,6 +73,7 @@ pub(crate) fn write_focus_script(
     Ok(script_path)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn focus_script_content_with_timeout(
     notification: &FocusNotification,
     herdr_bin: &str,
@@ -85,6 +102,7 @@ fn focus_script_content_with_timeout(
     )
 }
 
+#[cfg(not(target_os = "linux"))]
 fn test_timeout_secs(configured: u64) -> u64 {
     if configured == 0 {
         10
@@ -93,6 +111,7 @@ fn test_timeout_secs(configured: u64) -> u64 {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn alerter_focus_script(
     notification: &FocusNotification,
     herdr_bin: &str,
@@ -179,6 +198,103 @@ fn alerter_focus_script(
     script
 }
 
+#[cfg(target_os = "linux")]
+fn linux_focus_script(
+    notification: &FocusNotification,
+    herdr_bin: &str,
+    gdbus_bin: &str,
+    dbus_monitor_bin: &str,
+    focus_binary: &Path,
+) -> String {
+    let gdbus = shell_quote(gdbus_bin);
+    let dbus_monitor = shell_quote(dbus_monitor_bin);
+    let herdr = shell_quote(herdr_bin);
+    let focus_binary = shell_quote(&focus_binary.to_string_lossy());
+    let pane = shell_quote(&notification.pane_id);
+    let title = shell_quote(&serde_json::to_string(&notification.title).unwrap());
+    let body = shell_quote(&serde_json::to_string(&notification.body).unwrap());
+    let icon = shell_quote(
+        &serde_json::to_string(notification.app_icon.as_deref().unwrap_or("")).unwrap(),
+    );
+    let id_path = shell_quote(
+        crate::notifier::notification_id_path(&notification.pane_id)
+            .to_string_lossy()
+            .as_ref(),
+    );
+    let cleared_marker = shell_quote(
+        cleared_notification_marker_path(&notification.pane_id)
+            .to_string_lossy()
+            .as_ref(),
+    );
+
+    format!(
+        r#"#!/bin/sh
+[ -e {cleared_marker} ] && exit 0
+[ -s {id_path} ] && exit 0
+tmp_dir=$(mktemp -d "${{TMPDIR:-/tmp}}/herdr-focus-notify.XXXXXX") || exit 1
+events="$tmp_dir/events"
+mkfifo "$events" || exit 1
+monitor_pid=
+cleanup() {{
+  [ -z "$monitor_pid" ] || kill "$monitor_pid" 2>/dev/null
+  [ -z "$monitor_pid" ] || wait "$monitor_pid" 2>/dev/null
+  rm -rf "$tmp_dir"
+}}
+trap cleanup EXIT HUP INT TERM
+{dbus_monitor} --session "type='signal',interface='org.freedesktop.Notifications',member='ActionInvoked'" "type='signal',interface='org.freedesktop.Notifications',member='NotificationClosed'" >"$events" 2>&1 &
+monitor_pid=$!
+exec 3<"$events"
+sleep 0.1
+open_action="open-$$"
+dismiss_action="dismiss-$$"
+actions="['default', 'Open', '$open_action', 'Focus', '$dismiss_action', 'Dismiss']"
+hints="{{'resident': <true>}}"
+reply=$({gdbus} call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications --method org.freedesktop.Notifications.Notify 'Herdr Focus Notify' 0 {icon} {title} {body} "$actions" "$hints" 0) || exit 1
+notification_id=$(printf '%s' "$reply" | sed -n 's/.*uint32 \([0-9][0-9]*\).*/\1/p')
+[ -n "$notification_id" ] || exit 1
+printf '%s\n' "$notification_id" > {id_path}
+while IFS= read -r line <&3; do
+  case "$line" in
+    *member=ActionInvoked*)
+      IFS= read -r signal_id_line <&3 || exit 0
+      IFS= read -r action_id_line <&3 || exit 0
+      signal_id=$(printf '%s' "$signal_id_line" | sed -n 's/.*uint32 \([0-9][0-9]*\).*/\1/p')
+      action_id=$(printf '%s' "$action_id_line" | sed -n 's/.*string "\(.*\)".*/\1/p')
+      [ "$signal_id" = "$notification_id" ] || continue
+      case "$action_id" in
+        default|"$open_action"|"$dismiss_action")
+          {gdbus} call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications --method org.freedesktop.Notifications.CloseNotification "$notification_id" >/dev/null 2>&1 || :
+          rm -f {id_path}
+          if [ "$action_id" != "$dismiss_action" ]; then
+            HERDR_BIN_PATH={herdr} {focus_binary} --focus-pane {pane}
+            exit $?
+          fi
+          exit 0
+          ;;
+      esac
+      ;;
+    *member=NotificationClosed*)
+      IFS= read -r signal_id_line <&3 || exit 0
+      IFS= read -r _ <&3 || exit 0
+      signal_id=$(printf '%s' "$signal_id_line" | sed -n 's/.*uint32 \([0-9][0-9]*\).*/\1/p')
+      if [ "$signal_id" = "$notification_id" ]; then rm -f {id_path}; exit 0; fi
+      ;;
+  esac
+done
+"#,
+        gdbus = gdbus,
+        dbus_monitor = dbus_monitor,
+        herdr = herdr,
+        focus_binary = focus_binary,
+        pane = pane,
+        title = title,
+        body = body,
+        icon = icon,
+        id_path = id_path,
+        cleared_marker = cleared_marker,
+    )
+}
+
 /// Removes the activation command captured by scripts generated before
 /// terminal activation moved into `--focus-pane`. This lets the clear-bindings
 /// action make already-visible notifications safe to click as well.
@@ -255,6 +371,26 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_notifications_do_not_expire_and_click_focuses_the_pane() {
+        let script = linux_focus_script(
+            &sample_notification(),
+            "/usr/bin/herdr",
+            "/usr/bin/gdbus",
+            "/usr/bin/dbus-monitor",
+            Path::new("/tmp/herdr-focus-notify"),
+        );
+
+        assert!(script.contains("--method org.freedesktop.Notifications.Notify"));
+        assert!(script.contains("hints=\"{'resident': <true>}\""));
+        assert!(script.contains("\"$hints\" 0)"));
+        assert!(script.contains("--method org.freedesktop.Notifications.CloseNotification"));
+        assert!(script.contains("--focus-pane 'w1:p3'"));
+        assert!(script.contains("dismiss-$$"));
+    }
+
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn alerter_script_invokes_alerter_and_runs_focus_on_click() {
         let script = focus_script_content_with_timeout(
@@ -284,6 +420,7 @@ mod tests {
         assert!(script.contains("HERDR_BIN_PATH='/usr/local/bin/herdr' exec '/tmp/herdr-focus-notify' --focus-pane 'w1:p3'"));
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn alerter_script_includes_timeout_when_configured() {
         let script = alerter_focus_script(
@@ -298,6 +435,7 @@ mod tests {
         assert!(script.contains("--timeout 120"));
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn alerter_script_omits_timeout_when_zero() {
         let script = alerter_focus_script(
@@ -312,6 +450,7 @@ mod tests {
         assert!(!script.contains("--timeout"));
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn test_mode_uses_a_short_timeout() {
         assert_eq!(test_timeout_secs(3600), 10);
@@ -319,6 +458,7 @@ mod tests {
         assert_eq!(test_timeout_secs(5), 5);
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn alerter_script_defers_activation_to_focus_helper() {
         let script = alerter_focus_script(
@@ -334,6 +474,7 @@ mod tests {
         assert!(script.contains("HERDR_BIN_PATH='/usr/local/bin/herdr' exec '/tmp/herdr-focus-notify' --focus-pane 'w1:p3'"));
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn alerter_script_monitors_visibility_after_starting_the_notifier() {
         let script = alerter_focus_script(

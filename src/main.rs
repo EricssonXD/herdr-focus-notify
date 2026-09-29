@@ -114,6 +114,15 @@ fn run() -> Result<(), String> {
                         .map_err(|err| format!("failed to remove notification: {err}"))?;
                 }
 
+                #[cfg(target_os = "linux")]
+                if crate::notifier::notification_id_path(&pane_id).is_file() {
+                    let notifier_bin = resolve_notifier_bin()?;
+                    mark_notification_cleared(&pane_id)
+                        .map_err(|err| format!("failed to mark notification as cleared: {err}"))?;
+                    remove_notification(&pane_id, &notifier_bin)
+                        .map_err(|err| format!("failed to remove notification: {err}"))?;
+                }
+
                 return Ok(());
             }
 

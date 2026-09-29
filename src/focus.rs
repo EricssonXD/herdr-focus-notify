@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::env;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
+#[cfg(not(target_os = "linux"))]
 use std::process::Command;
 use std::time::Duration;
 
@@ -58,13 +59,37 @@ pub(crate) fn test_notification(herdr_bin: &str) -> FocusNotification {
     }
 }
 
-/// Activates the workspace's bound terminal and focuses the target pane.
-///
-/// Without a terminal binding there is no visible app to activate, so a
-/// notification click is intentionally a no-op. A binding is checked again
-/// here at click time because generated notification scripts can outlive the
-/// state that existed when they were written.
+/// Focuses the target pane, raising a supported terminal container when possible.
 pub(crate) fn focus_pane(pane_id: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        focus_pane_linux(pane_id)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        focus_pane_macos(pane_id)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn focus_pane_linux(pane_id: &str) -> Result<(), String> {
+    let workspace = crate::util::workspace_id_from_pane_id(pane_id).unwrap_or("default");
+    let socket_path =
+        env::var("HERDR_SOCKET_PATH").map_err(|_| "HERDR_SOCKET_PATH is unavailable")?;
+    crate::state::mark_focus_origin(workspace)
+        .map_err(|err| format!("failed to mark notification focus: {err}"))?;
+    // ponytail: Wayland window activation is compositor-specific. Raise kitty
+    // when possible; the Herdr socket focus works without terminal bindings.
+    let _ = crate::terminal::raise_client_container("net.kovidgoyal.kitty", &socket_path);
+    let result = focus_pane_via_socket(pane_id, &socket_path);
+    if result.is_err() {
+        let _ = crate::state::clear_focus_origin(workspace);
+    }
+    result
+}
+
+#[cfg(not(target_os = "linux"))]
+fn focus_pane_macos(pane_id: &str) -> Result<(), String> {
     let workspace = crate::util::workspace_id_from_pane_id(pane_id).unwrap_or("default");
     let Some(bound_terminal) = crate::state::remembered_terminal(workspace) else {
         return Ok(());
@@ -72,9 +97,6 @@ pub(crate) fn focus_pane(pane_id: &str) -> Result<(), String> {
     crate::state::mark_focus_origin(workspace)
         .map_err(|err| format!("failed to mark notification focus: {err}"))?;
     let result = (|| -> Result<(), String> {
-        // Select the terminal container showing Herdr before activating the
-        // terminal, so it brings that container forward. Terminals without an
-        // adapter, or any failure, keep plain app activation.
         let socket_path = env::var("HERDR_SOCKET_PATH").ok();
         if let Some(socket_path) = &socket_path {
             let _ = crate::terminal::raise_client_container(&bound_terminal, socket_path);
@@ -83,11 +105,9 @@ pub(crate) fn focus_pane(pane_id: &str) -> Result<(), String> {
         let socket_path = socket_path.ok_or("HERDR_SOCKET_PATH is unavailable")?;
         focus_pane_via_socket(pane_id, &socket_path)
     })();
-
     if result.is_err() {
         let _ = crate::state::clear_focus_origin(workspace);
     }
-
     result
 }
 
@@ -156,6 +176,7 @@ fn focus_pane_via_socket(pane_id: &str, socket_path: &str) -> Result<(), String>
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 fn activate_terminal(bundle_id: &str) -> Result<(), String> {
     let output = Command::new("open")
         .args(["-b", bundle_id])

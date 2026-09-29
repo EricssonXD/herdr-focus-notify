@@ -6,6 +6,8 @@
 //! to the client as `KITTY_LISTEN_ON`.
 
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 
 use super::{FocusCommand, HerdrClient, TerminalAdapter};
 
@@ -21,12 +23,16 @@ impl TerminalAdapter for Kitty {
             .env("KITTY_WINDOW_ID")
             .filter(|id| id.bytes().all(|b| b.is_ascii_digit()))?;
         let listen_on = client.env("KITTY_LISTEN_ON")?;
-        // KITTY_INSTALLATION_DIR is `kitty.app/Contents/Resources/kitty`; the
-        // kitten binary lives in `kitty.app/Contents/MacOS`.
+        #[cfg(target_os = "macos")]
         let kitten = Path::new(client.env("KITTY_INSTALLATION_DIR")?)
             .parent()?
             .parent()?
             .join("MacOS/kitten");
+        #[cfg(target_os = "linux")]
+        let kitten = client
+            .env("KITTY_INSTALLATION_DIR")
+            .map(|dir| Path::new(dir).join("kitten"))
+            .unwrap_or_else(|| PathBuf::from("kitten"));
         let target = format!("id:{window_id}");
         Some(FocusCommand::new(
             kitten,
@@ -48,6 +54,7 @@ mod tests {
         HerdrClient::from_pairs(pairs)
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn focuses_the_client_kitty_window() {
         let command = Kitty.focus_command(&client(&[
@@ -71,6 +78,28 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finds_the_linux_kitten_binary_from_client_env_or_path() {
+        assert_eq!(
+            Kitty.focus_command(&client(&[
+                ("KITTY_WINDOW_ID", "3"),
+                ("KITTY_LISTEN_ON", "unix:/tmp/kitty"),
+            ])),
+            Some(FocusCommand::new(
+                "kitten",
+                [
+                    "@",
+                    "--to",
+                    "unix:/tmp/kitty",
+                    "focus-window",
+                    "--match",
+                    "id:3",
+                ],
+            ))
+        );
+    }
+
     #[test]
     fn requires_remote_control_and_a_numeric_window_id() {
         let listen = ("KITTY_LISTEN_ON", "unix:/tmp/kitty");
@@ -83,6 +112,7 @@ mod tests {
             None
         );
         assert_eq!(Kitty.focus_command(&client(&[listen, INSTALL])), None);
+        #[cfg(not(target_os = "linux"))]
         assert_eq!(
             Kitty.focus_command(&client(&[("KITTY_WINDOW_ID", "3"), listen])),
             None

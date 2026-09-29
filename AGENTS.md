@@ -2,7 +2,7 @@
 
 ## Project Type
 
-A Rust CLI binary that runs as a **Herdr plugin** on macOS. It listens for Herdr's `pane.agent_status_changed` event and emits clickable macOS desktop notifications via `alerter`. Clicking a notification focuses the matching Herdr agent pane.
+A Rust CLI binary that runs as a **Herdr plugin** on macOS and Linux. It listens for Herdr's `pane.agent_status_changed` event and emits clickable desktop notifications. macOS uses `alerter`; Linux uses Freedesktop D-Bus notifications. Clicking a notification focuses the matching Herdr pane.
 
 The plugin manifest is in [`herdr-plugin.toml`](herdr-plugin.toml). The binary is built by Herdr itself using the command declared in that manifest.
 
@@ -17,7 +17,7 @@ The plugin manifest is in [`herdr-plugin.toml`](herdr-plugin.toml). The binary i
 | `herdr plugin link .` | Install the plugin locally from the repo root. |
 | `target/release/herdr-focus-notify --test` | Trigger a test notification manually (declared as an action in `herdr-plugin.toml`). |
 
-CI runs on `macos-latest` and executes all of the above in order (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+CI runs on macOS and Ubuntu and executes all of the above in order (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ## Project Structure
 
@@ -50,7 +50,7 @@ There are no submodules, no external crates beyond serde/serde_json, and no buil
    - Notification titles and bodies use short status-specific copy: blocked agents ask the user to review and respond, while done agents ask the user to review the result. The plugin does not read or summarize pane contents.
 4. **Binary resolution**:
    - `herdr` is resolved from `HERDR_BIN_PATH`, then `PATH`, then hard-coded candidates (`~/.local/bin/herdr`, `/opt/homebrew/bin/herdr`, `/usr/local/bin/herdr`), defaulting to `"herdr"`.
-   - The notifier backend is resolved from `PATH`, then hard-coded candidates for `alerter` (e.g. Homebrew paths).
+   - The notifier backend is resolved from `PATH`: `alerter` on macOS, `gdbus` and `dbus-monitor` on Linux.
 5. **Focus script generation**:
    - A shell script is written to `HERDR_PLUGIN_STATE_DIR` (falling back to `$TMPDIR/herdr-focus-notify`).
    - The script name is a hash of the pane ID, so repeated events for one pane reuse the same script path. Old generated scripts and crashed notifier temp files are cleaned up opportunistically.
@@ -89,11 +89,11 @@ Bundled agent icons are extracted from `@lobehub/icons-static-png` (except `omp.
 - Unit tests are inline under each module's `#[cfg(test)] mod tests`; process-level CLI behavior lives under `tests/`.
 - Run with `cargo test`.
 - Tests cover JSON parsing, notification body construction, shell quoting, focus script generation, and skip logic.
-- Some runtime behavior (the real `lsappinfo` frontmost-app lookup, actual alerter invocation, `herdr agent get`, and the test-mode `herdr pane list`) cannot be exercised in CI and is only validated manually on macOS.
+- Some runtime behavior (the real macOS `lsappinfo` lookup, actual OS notification delivery, `herdr agent get`, and test-mode `herdr pane list`) cannot be exercised in CI and is only validated manually.
 
 ## Important Gotchas
 
-- **macOS only**: The plugin manifest declares `platforms = ["macos"]`. The binary shells out to macOS-only tools (`lsappinfo` for the frontmost app, `open -b` for terminal activation, `alerter` for delivery); it will not behave correctly on other platforms.
+- **Linux notifications persist**: Linux requests an infinite D-Bus timeout and the resident hint; the desktop notification service can still impose its own policy. Linux pane focus uses Herdr's socket and attempts kitty remote control, but generic Wayland window activation is not portable.
 - **No-event quiet path**: A normal plugin invocation without `HERDR_PLUGIN_EVENT_JSON` exits quietly with `0`. Real parsing, script, and notifier errors should surface through stderr and non-zero exit codes.
 - **Skip logic is conservative**: A notification is only suppressed when the plugin can *confirm* the pane is focused and the frontmost app is the terminal bound to the pane's workspace. Any ambiguity (a failed `lsappinfo` lookup, an unknown frontmost app, a missing binding) results in a notification being sent. The learned-terminal file lives in the state directory as `terminal-memory.json` and is deliberately excluded from the stale-file sweep. Obvious non-terminal bundle IDs are treated as unbound when read.
 - **State directory hygiene**: Generated scripts are keyed by a hash of the pane ID, so repeated events for one pane reuse the same script path. A retention sweep removes stale generated scripts (30 days), focus-origin markers (15 seconds), crashed notifier temp files (24 hours), and `.cleared` focus markers (24 hours); it runs on `--cleanup` (including the Herdr startup hook) and opportunistically before each notification. Cleanup and the clear-bindings action also remove the old captured `open -b` line from scripts generated by earlier versions.

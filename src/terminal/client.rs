@@ -2,6 +2,7 @@
 //! locate their terminal container.
 
 use std::env;
+#[cfg(target_os = "macos")]
 use std::ffi::{c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -133,6 +134,7 @@ fn tty_last_input(tty: &str) -> Option<SystemTime> {
         .ok()
 }
 
+#[cfg(target_os = "macos")]
 extern "C" {
     fn sysctl(
         name: *mut c_int,
@@ -144,14 +146,18 @@ extern "C" {
     ) -> c_int;
 }
 
+#[cfg(target_os = "macos")]
 const CTL_KERN: c_int = 1;
+#[cfg(target_os = "macos")]
 const KERN_ARGMAX: c_int = 8;
+#[cfg(target_os = "macos")]
 const KERN_PROCARGS2: c_int = 49;
 
 /// Reads another process's environment with `sysctl(KERN_PROCARGS2)`.
 ///
 /// `ps eww` prints the same data, but joined by spaces, which makes values
 /// containing spaces (such as a socket path) ambiguous.
+#[cfg(target_os = "macos")]
 fn process_environment(pid: u32) -> Option<Vec<(String, String)>> {
     let mut argmax: c_int = 0;
     let mut size = std::mem::size_of::<c_int>();
@@ -193,9 +199,25 @@ fn process_environment(pid: u32) -> Option<Vec<(String, String)>> {
     environment_from_procargs(&buffer)
 }
 
+#[cfg(target_os = "linux")]
+fn process_environment(pid: u32) -> Option<Vec<(String, String)>> {
+    let bytes = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    Some(
+        bytes
+            .split(|byte| *byte == 0)
+            .filter_map(|entry| {
+                let entry = String::from_utf8_lossy(entry);
+                let (key, value) = entry.split_once('=')?;
+                Some((key.to_string(), value.to_string()))
+            })
+            .collect(),
+    )
+}
+
 /// Parses a `KERN_PROCARGS2` buffer: a native-endian `argc`, the executable
 /// path, NUL padding, `argc` arguments, then the environment until an empty
 /// string or the end of the buffer.
+#[cfg(target_os = "macos")]
 fn environment_from_procargs(buffer: &[u8]) -> Option<Vec<(String, String)>> {
     let argc = i32::from_ne_bytes(buffer.get(..4)?.try_into().ok()?);
     let mut strings = buffer[4..].split(|byte| *byte == 0);
@@ -329,6 +351,7 @@ n->0xother
         assert_eq!(client.env("MISSING"), None);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn parses_environment_from_procargs() {
         let mut buffer = 2i32.to_ne_bytes().to_vec();
@@ -343,6 +366,7 @@ n->0xother
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn rejects_truncated_procargs() {
         assert_eq!(environment_from_procargs(&[1, 0]), None);

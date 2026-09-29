@@ -2,9 +2,9 @@
 
 English | [简体中文](README.zh-CN.md)
 
-`herdr-focus-notify` is a macOS plugin for Herdr. It shows a clickable desktop notification when an agent is `blocked` or `done`. Clicking it brings the matching Herdr pane into focus.
+`herdr-focus-notify` is a desktop notification plugin for Herdr on macOS and Linux. It shows a clickable notification when an agent is `blocked` or `done`. Clicking it focuses the matching Herdr pane.
 
-It is designed to notify you only when the change is easy to miss: when Herdr is not frontmost, or when you are looking at a different pane.
+On macOS it avoids alerts when it can confirm that you are already looking at the pane. Linux always alerts on these status changes because frontmost-window detection is not portable.
 
 ## Herdr compatibility
 
@@ -16,15 +16,11 @@ The minimum supported Herdr version remains `0.7.5`. Workspace-to-terminal bindi
 
 ### 1. Install the requirements
 
-- macOS
 - Herdr `0.7.5` or later
-- [alerter](https://github.com/vjeantet/alerter), which displays the clickable notification
+- macOS: [alerter](https://github.com/vjeantet/alerter)
+- Linux: `gdbus`, `dbus-monitor`, and a Freedesktop-compatible notification service
 
-Install alerter:
-
-```bash
-brew install vjeantet/tap/alerter
-```
+On macOS, install alerter with `brew install vjeantet/tap/alerter`. On Debian/Ubuntu, the Linux tools are provided by `libglib2.0-bin` and `dbus`.
 
 ### 2. Install the plugin
 
@@ -43,17 +39,15 @@ herdr plugin link .
 
 ### 3. Done — zero configuration
 
-The plugin works with **zero configuration**. The first time you focus a pane in Herdr, the plugin binds the frontmost terminal to that pane's workspace, then uses it to activate the terminal on click and to recognise when you are already looking at a pane. Bindings are per-workspace: switch from kitty to Ghostty and keep working on the same pane, and clicking a notification activates Ghostty. A notification click never changes the binding, even when the browser or another app is frontmost during the click.
+The plugin works with **zero configuration**. On macOS it learns the terminal bound to each workspace and activates it on click. On Linux it uses the desktop notification service directly and focuses the Herdr pane over its socket; kitty is raised when its remote-control adapter is available.
 
-No configuration files needed. The only external dependency is alerter, auto-detected from `PATH` and common Homebrew locations:
-
-```bash
-brew install vjeantet/tap/alerter
-```
+No configuration files are needed. The required notification tools are detected from `PATH`.
 
 ## How notifications behave
 
-By default, `blocked` and `done` status changes can produce a notification. The plugin sends one only when it cannot confirm that you are already looking at that pane.
+By default, `blocked` and `done` status changes can produce a notification. macOS suppresses one only when it can confirm that you are already looking at that pane. Linux errs on the side of notifying.
+
+On macOS:
 
 | Your current view | Notification |
 |---|---|
@@ -63,9 +57,13 @@ By default, `blocked` and `done` status changes can produce a notification. The 
 | The terminal bound to the pane's workspace is frontmost and the pane is focused | Skipped (you are looking at Herdr) |
 | The focused app cannot be determined | Sent, to avoid missing a change |
 
-Clicking a notification with a saved terminal binding activates that terminal, then sends Herdr's `pane.focus` socket request for the notification's pane. This atomically displays the matching workspace, tab, and pane, including ordinary shell panes without a detected agent. When multiple clients share a server, it switches all of them to that pane. If the workspace has no binding, the click does not activate an app or issue a Herdr focus request; focus the pane manually once in the terminal to establish the binding.
+Clicking a notification sends Herdr's `pane.focus` socket request for the target pane. On macOS, a saved terminal binding activates the terminal first. On Linux, kitty's remote-control adapter raises its window when available; other terminal/window-manager activation is desktop-specific.
 
-### Multiple terminal windows and tabs
+## Linux: persistent question notifications
+
+The `pi-ask-user` extension marks the agent `blocked` while waiting for your answer, so the existing blocked-status event triggers this notification. Linux notifications request no expiry and stay resident until you dismiss them or choose **Open**/**Focus**; clicking to focus sends Herdr's pane-focus request. Notification servers can still enforce their own policy. The notification copy is generic and does not expose the question text.
+
+### macOS: multiple terminal windows and tabs
 
 With several windows or tabs open, activating the terminal app alone may bring forward one that is not running Herdr. In supported terminals, a click first selects the window, tab, or split running a Herdr client attached to that session, and raises it together with its OS window. When several clients are attached, the most recently used one is chosen.
 
@@ -84,23 +82,21 @@ In other terminals, or in kitty without these settings, the click only activates
 
 Blocked notifications say that the agent needs your input and prompt you to review and respond. Done notifications say that the agent finished and prompt you to review the result. The plugin does not read or summarize pane contents.
 
-When you manually focus the matching pane in Herdr while its terminal is frontmost, its pending notification is removed.
+When you manually focus the matching pane in Herdr, its pending notification is removed. On macOS, a notification for an already-active pane also clears shortly after returning to its bound terminal.
 
-If the pane was already active when the notification arrived, returning to that terminal removes it within a few seconds.
-
-## How it stays quiet
+## macOS: how it stays quiet
 
 - Notifications only fire for `blocked` and `done` — the two statuses that actually need you.
 - A notification is skipped when the pane is already focused **and** the frontmost app is the terminal bound to its workspace (learned automatically).
 - If you are elsewhere when the pane becomes active, the notification auto-removes within a few seconds once you switch back to the bound terminal.
 
-The `--test` action sends a real test notification (capped at 10 seconds) so you can verify the whole pipeline.
+The `--test` action sends a real notification so you can verify the pipeline. Linux test notifications also remain until dismissed or clicked.
 
 ## Troubleshooting
 
 | Problem | What to check |
 |---|---|
-| No notification appears | Make sure `alerter` is installed and executable; it is auto-detected from `PATH` and common Homebrew locations (`brew install vjeantet/tap/alerter`). |
+| No notification appears | Check that `alerter` is installed on macOS, or `gdbus` and `dbus-monitor` are on `PATH` and a desktop notification service is running on Linux. |
 | Click brings the right terminal forward, but not the window or tab running Herdr | Window and tab selection works only in iTerm2 and in kitty with remote control enabled (see [Multiple terminal windows and tabs](#multiple-terminal-windows-and-tabs)). Other terminals only get app-level activation. |
 | Click does not bring forward the expected terminal | Use the **Clear saved terminal bindings** plugin action, then focus a pane once in the expected terminal. |
 | A workspace has a stale terminal binding | Use the **Clear saved terminal bindings** plugin action, then focus a pane once in the expected terminal. |
