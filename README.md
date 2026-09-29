@@ -27,7 +27,7 @@ On macOS, install alerter with `brew install vjeantet/tap/alerter`. On Debian/Ub
 Install from GitHub:
 
 ```bash
-herdr plugin install yankewei/herdr-focus-notify
+herdr plugin install EricssonXD/herdr-focus-notify
 ```
 
 Or build and link the local checkout:
