@@ -2,7 +2,8 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::util::notification_group_id;
 
@@ -14,6 +15,74 @@ pub(crate) fn plugin_state_dir() -> PathBuf {
     env::var_os("HERDR_PLUGIN_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| env::temp_dir().join("herdr-focus-notify"))
+}
+
+/// A live Pi subagent registers its Herdr pane here so completion notifications
+/// can be suppressed without changing the status Herdr receives.
+pub(crate) fn is_subagent_pane(pane_id: &str) -> bool {
+    is_subagent_pane_in(&plugin_state_dir(), pane_id, unix_time_millis())
+}
+
+fn is_subagent_pane_in(state_dir: &Path, pane_id: &str, now_ms: u64) -> bool {
+    let Some(path) = subagent_notification_marker_path(state_dir, pane_id) else {
+        return false;
+    };
+    let active = subagent_marker_is_active(&path, now_ms);
+    if !active {
+        let _ = fs::remove_file(path);
+    }
+    active
+}
+
+fn subagent_notification_marker_path(state_dir: &Path, pane_id: &str) -> Option<PathBuf> {
+    if pane_id.is_empty() || pane_id.len() > 256 {
+        return None;
+    }
+    let pane_hex: String = pane_id
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Some(state_dir.join(format!("subagent-pane-{pane_hex}.json")))
+}
+
+#[derive(serde::Deserialize)]
+struct SubagentPaneMarker {
+    pid: u32,
+    shutdown_until_ms: Option<u64>,
+}
+
+fn subagent_marker_is_active(path: &Path, now_ms: u64) -> bool {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<SubagentPaneMarker>(&bytes).ok())
+        .is_some_and(|marker| match marker.shutdown_until_ms {
+            Some(until) => now_ms <= until,
+            None => process_is_running(marker.pid),
+        })
+}
+
+fn process_is_running(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    let pid = pid.to_string();
+    Command::new("/bin/kill")
+        .args(["-0", &pid])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or_default()
 }
 
 /// The most recently used terminal (learned from `pane.focused` events) is
@@ -254,6 +323,10 @@ fn cleanup_stale_state_files_in(
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err),
     };
+    let now_ms = now
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or_default();
 
     for entry in entries {
         let entry = entry?;
@@ -261,6 +334,17 @@ fn cleanup_stale_state_files_in(
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+
+        if name.starts_with("subagent-pane-") && name.ends_with(".json") {
+            if !subagent_marker_is_active(&path, now_ms) && path.is_file() {
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(err),
+                }
+            }
+            continue;
+        }
 
         let Some(retention) = retention_for(
             name,
@@ -326,6 +410,61 @@ mod tests {
         assert!(!dir.join("herdr-w1-p1.cleared").exists());
         assert!(!dir.join("focus-origin-w1.marker").exists());
         assert!(dir.join("focus-click.log").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn subagent_markers_encode_ids_and_expire_after_child_shutdown() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-focus-notify-subagent-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let pane_id = "w1:p/2";
+        let marker = subagent_notification_marker_path(&dir, pane_id).unwrap();
+        assert_eq!(
+            marker.file_name().unwrap(),
+            "subagent-pane-77313a702f32.json"
+        );
+
+        let now_ms = unix_time_millis();
+        assert!(!is_subagent_pane_in(&dir, "w1:p1", now_ms));
+        fs::write(
+            &marker,
+            serde_json::json!({
+                "pid": 9_999_999,
+                "shutdown_until_ms": now_ms + 1_000,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(is_subagent_pane_in(&dir, pane_id, now_ms));
+
+        fs::write(
+            &marker,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "shutdown_until_ms": now_ms.saturating_sub(1),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(!is_subagent_pane_in(&dir, pane_id, now_ms));
+        assert!(!marker.exists());
+
+        fs::write(
+            &marker,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "shutdown_until_ms": null,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(is_subagent_pane_in(&dir, pane_id, now_ms));
+
         fs::remove_dir_all(dir).unwrap();
     }
 

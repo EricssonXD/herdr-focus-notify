@@ -23,6 +23,10 @@ pub(crate) fn status_is_enabled(status: &str) -> bool {
     matches!(status, "blocked" | "done")
 }
 
+pub(crate) fn should_suppress_notification(status: &str, is_subagent: bool) -> bool {
+    status == "done" && is_subagent
+}
+
 pub(crate) fn notification_from_event_json(
     json: &str,
 ) -> Result<Option<FocusNotification>, String> {
@@ -167,6 +171,13 @@ mod tests {
 
         assert_eq!(notification.title, "Codex needs your input");
         assert_eq!(notification.body, "Open the pane to review and respond.");
+    }
+
+    #[test]
+    fn suppresses_only_done_notifications_for_subagents() {
+        assert!(should_suppress_notification("done", true));
+        assert!(!should_suppress_notification("blocked", true));
+        assert!(!should_suppress_notification("done", false));
     }
 
     #[test]

@@ -14,17 +14,21 @@ use std::env;
 use std::process::ExitCode;
 
 use cli::{parse_cli_args, print_usage, CliAction};
-use event::{focused_pane_id_from_event_json, notification_from_event_json, status_is_enabled};
+use event::{
+    focused_pane_id_from_event_json, notification_from_event_json, should_suppress_notification,
+    status_is_enabled,
+};
 use executable::resolve_herdr_bin;
 use focus::{
     frontmost_bundle_id, learn_terminal_from_frontmost, notification_decision,
-    should_clear_notification_on_focus, test_notification, NotificationDecision,
+    should_clear_notification_on_focus, test_notification, workspace_tab_labels,
+    NotificationDecision,
 };
 use notifier::{remove_notification, resolve_notifier_bin, send_notification};
 use script::{rewrite_generated_scripts_without_activation, write_focus_script};
 use state::{
-    cleanup_stale_state_files, clear_terminal_bindings, mark_notification_cleared,
-    prune_stale_workspace_bindings, reset_notification_clearance,
+    cleanup_stale_state_files, clear_terminal_bindings, is_subagent_pane,
+    mark_notification_cleared, prune_stale_workspace_bindings, reset_notification_clearance,
 };
 
 fn main() -> ExitCode {
@@ -83,7 +87,7 @@ fn run() -> Result<(), String> {
 
     let herdr_bin = resolve_herdr_bin()?;
 
-    let notification = match action {
+    let mut notification = match action {
         CliAction::Test => test_notification(&herdr_bin),
         CliAction::Event => {
             let Ok(event_json) = env::var("HERDR_PLUGIN_EVENT_JSON") else {
@@ -144,6 +148,12 @@ fn run() -> Result<(), String> {
     if action != CliAction::Test && !status_is_enabled(&notification.status) {
         return Ok(());
     }
+    let is_subagent_done = action != CliAction::Test
+        && notification.status == "done"
+        && is_subagent_pane(&notification.pane_id);
+    if should_suppress_notification(&notification.status, is_subagent_done) {
+        return Ok(());
+    }
 
     let mut notification_decision = notification_decision(&notification.pane_id, &herdr_bin);
     if notification_decision == NotificationDecision::Skip {
@@ -155,6 +165,10 @@ fn run() -> Result<(), String> {
         } else {
             return Ok(());
         }
+    }
+
+    if let Some((workspace, tab)) = workspace_tab_labels(&notification.pane_id, &herdr_bin) {
+        notification.body = format!("{workspace} / {tab} — {}", notification.body);
     }
 
     reset_notification_clearance(&notification.pane_id)

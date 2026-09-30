@@ -202,6 +202,37 @@ pub(crate) fn notification_decision(pane_id: &str, herdr_bin: &str) -> Notificat
     )
 }
 
+pub(crate) fn workspace_tab_labels(pane_id: &str, herdr_bin: &str) -> Option<(String, String)> {
+    let pane_json = command_stdout(herdr_bin, &["pane", "get", pane_id])?;
+    let (workspace_id, tab_id) = pane_workspace_tab_ids(&pane_json)?;
+    let workspace_json = command_stdout(herdr_bin, &["workspace", "get", &workspace_id])?;
+    let tab_json = command_stdout(herdr_bin, &["tab", "get", &tab_id])?;
+    Some((
+        herdr_label(&workspace_json, "workspace")?,
+        herdr_label(&tab_json, "tab")?,
+    ))
+}
+
+fn pane_workspace_tab_ids(json: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let pane = value.get("result")?.get("pane")?;
+    Some((
+        pane.get("workspace_id")?.as_str()?.to_string(),
+        pane.get("tab_id")?.as_str()?.to_string(),
+    ))
+}
+
+fn herdr_label(json: &str, resource: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let label = value
+        .get("result")?
+        .get(resource)?
+        .get("label")?
+        .as_str()?
+        .trim();
+    (!label.is_empty()).then(|| label.to_string())
+}
+
 /// Whether the previously queued notification for the now-focused pane can be
 /// removed. The user only sees the pane when the frontmost app is the terminal
 /// bound to its workspace, so removal requires the frontmost bundle id to be
@@ -417,6 +448,24 @@ mod tests {
         // No panes at all is untrustworthy for pruning.
         let empty = r#"{"id":"cli:pane:list","result":{"panes":[]}}"#;
         assert_eq!(live_workspace_ids_from_pane_list_json(empty).unwrap(), None);
+    }
+
+    #[test]
+    fn reads_workspace_and_tab_labels_from_herdr_responses() {
+        let pane = r#"{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2"}}}"#;
+        let workspace = r#"{"result":{"workspace":{"label":"Project"}}}"#;
+        let tab = r#"{"result":{"tab":{"label":"Review"}}}"#;
+
+        assert_eq!(
+            pane_workspace_tab_ids(pane),
+            Some(("w1".to_string(), "w1:t2".to_string()))
+        );
+        assert_eq!(
+            herdr_label(workspace, "workspace").as_deref(),
+            Some("Project")
+        );
+        assert_eq!(herdr_label(tab, "tab").as_deref(), Some("Review"));
+        assert_eq!(herdr_label("{}", "workspace"), None);
     }
 
     #[test]
