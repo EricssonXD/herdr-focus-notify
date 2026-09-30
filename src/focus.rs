@@ -78,9 +78,11 @@ fn focus_pane_linux(pane_id: &str) -> Result<(), String> {
         env::var("HERDR_SOCKET_PATH").map_err(|_| "HERDR_SOCKET_PATH is unavailable")?;
     crate::state::mark_focus_origin(workspace)
         .map_err(|err| format!("failed to mark notification focus: {err}"))?;
-    // ponytail: Wayland window activation is compositor-specific. Raise kitty
-    // when possible; the Herdr socket focus works without terminal bindings.
-    let _ = crate::terminal::raise_client_container("net.kovidgoyal.kitty", &socket_path);
+    // ponytail: generic Wayland activation is compositor-specific. Ghostty
+    // raises an exact surface only when it exports GHOSTTY_SURFACE_ID; otherwise
+    // try kitty's remote-control adapter. The Herdr socket focus works either way.
+    let _ = crate::terminal::raise_client_container("com.mitchellh.ghostty", &socket_path)
+        .or_else(|_| crate::terminal::raise_client_container("net.kovidgoyal.kitty", &socket_path));
     let result = focus_pane_via_socket(pane_id, &socket_path);
     if result.is_err() {
         let _ = crate::state::clear_focus_origin(workspace);

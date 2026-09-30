@@ -57,7 +57,7 @@ On macOS:
 | The terminal bound to the pane's workspace is frontmost and the pane is focused | Skipped (you are looking at Herdr) |
 | The focused app cannot be determined | Sent, to avoid missing a change |
 
-Clicking a notification sends Herdr's `pane.focus` socket request for the target pane. On macOS, a saved terminal binding activates the terminal first. On Linux, kitty's remote-control adapter raises its window when available; other terminal/window-manager activation is desktop-specific.
+Clicking a notification sends Herdr's `pane.focus` socket request for the target pane. On macOS, a saved terminal binding activates the terminal first. On Linux, Ghostty's D-Bus `present-surface` action raises the exact surface when `GHOSTTY_SURFACE_ID` is available; kitty's remote-control adapter is also supported. Older Ghostty builds without a surface ID can focus the Herdr pane but cannot be targeted externally.
 
 ## Linux: persistent question notifications
 

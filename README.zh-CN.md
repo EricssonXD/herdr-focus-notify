@@ -73,6 +73,7 @@ brew install vjeantet/tap/alerter
 |---|---|
 | iTerm2 | 无需配置。插件会把客户端的 `ITERM_SESSION_ID` 交给 iTerm2 内置的 reveal URL。 |
 | kitty | 需要开启远程控制，见下方配置。 |
+| Ghostty（Linux） | 需要运行中的客户端提供 `GHOSTTY_SURFACE_ID`；不提供该 ID 的版本只能聚焦 Herdr pane，无法精确激活 Ghostty window。 |
 
 ```conf
 # kitty.conf（修改后需重启 kitty）
